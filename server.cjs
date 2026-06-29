@@ -107,80 +107,64 @@ app.post("/api/upload", (req, res, next) => {
     ])).filter(Boolean);
     let lastError = null;
     let successfulBucket = "";
-    let responseJson = null;
+    let downloadUrl = "";
     const downloadToken = import_crypto.default.randomUUID();
     for (const bucket of bucketCandidates) {
       try {
-        console.log(`[API UPLOAD] Trying upload to bucket: ${bucket}`);
-        const url = `https://storage.googleapis.com/upload/storage/v1/b/${bucket}/o?uploadType=multipart&key=${firebaseConfig.apiKey}`;
-        const boundary = "tlbIlmRUploadBoundaryUnique";
-        const objectMetadata = {
-          name: objectPath,
+        console.log(`[API UPLOAD] Attempting Firebase JS SDK upload to bucket: ${bucket}`);
+        const bucketStorage = (0, import_storage.getStorage)(firebaseApp, `gs://${bucket}`);
+        const storageRef = (0, import_storage.ref)(bucketStorage, objectPath);
+        const metadata = {
           contentType: file.mimetype || "application/octet-stream",
-          metadata: {
+          customMetadata: {
             serverToken: "TLB_ILM_R_SECRET_UPLOAD_TOKEN_2026",
             firebaseStorageDownloadTokens: downloadToken
           }
         };
-        const part1Header = `--${boundary}\r
-Content-Type: application/json; charset=UTF-8\r
-\r
-`;
-        const part1Body = JSON.stringify(objectMetadata);
-        const part2Header = `\r
---${boundary}\r
-Content-Type: ${file.mimetype || "application/octet-stream"}\r
-\r
-`;
-        const footerStr = `\r
---${boundary}--\r
-`;
-        const requestBody = Buffer.concat([
-          Buffer.from(part1Header, "utf-8"),
-          Buffer.from(part1Body, "utf-8"),
-          Buffer.from(part2Header, "utf-8"),
-          file.buffer,
-          Buffer.from(footerStr, "utf-8")
-        ]);
-        const uploadResponse = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": `multipart/related; boundary="${boundary}"`,
-            "Content-Length": String(requestBody.length)
-          },
-          body: requestBody
-        });
-        if (!uploadResponse.ok) {
-          console.log(`[API UPLOAD] Bucket ${bucket} is not active (status ${uploadResponse.status})`);
-          throw new Error(`GCS REST API issue on ${bucket} (status: ${uploadResponse.status})`);
-        }
-        responseJson = await uploadResponse.json();
+        const snapshot = await (0, import_storage.uploadBytes)(storageRef, file.buffer, metadata);
+        const urlResult = await (0, import_storage.getDownloadURL)(snapshot.ref);
         successfulBucket = bucket;
-        console.log(`[API UPLOAD] Upload complete on bucket: ${successfulBucket}`);
+        downloadUrl = urlResult;
+        console.log(`[API UPLOAD] Success with JS SDK on bucket: ${bucket}, URL: ${downloadUrl}`);
         break;
-      } catch (err) {
-        lastError = err;
+      } catch (sdkErr) {
+        console.warn(`[API UPLOAD] JS SDK upload failed on bucket ${bucket}:`, sdkErr.message || sdkErr);
+        try {
+          console.log(`[API UPLOAD] Falling back to direct REST API upload to bucket: ${bucket}`);
+          const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?name=${encodeURIComponent(objectPath)}`;
+          const uploadResponse = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": file.mimetype || "application/octet-stream",
+              "x-goog-meta-serverToken": "TLB_ILM_R_SECRET_UPLOAD_TOKEN_2026",
+              "x-goog-meta-firebaseStorageDownloadTokens": downloadToken,
+              "x-goog-meta-servertoken": "TLB_ILM_R_SECRET_UPLOAD_TOKEN_2026",
+              "x-goog-meta-firebasestoragedownloadtokens": downloadToken
+            },
+            body: file.buffer
+          });
+          if (uploadResponse.ok) {
+            successfulBucket = bucket;
+            downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(objectPath)}?alt=media&token=${downloadToken}`;
+            console.log(`[API UPLOAD] Success with REST API on bucket: ${bucket}, URL: ${downloadUrl}`);
+            break;
+          } else {
+            const errText = await uploadResponse.text();
+            throw new Error(`REST API returned status ${uploadResponse.status}: ${errText}`);
+          }
+        } catch (restErr) {
+          console.error(`[API UPLOAD] Both JS SDK and REST API failed on bucket ${bucket}:`, restErr.message || restErr);
+          lastError = restErr;
+        }
       }
     }
     if (!successfulBucket) {
-      console.log("[API UPLOAD] No remote buckets active. Using fallback storage.");
-      const localFolderDir = import_path.default.join(process.cwd(), "uploads", folder);
-      if (!import_fs.default.existsSync(localFolderDir)) {
-        import_fs.default.mkdirSync(localFolderDir, { recursive: true });
-      }
-      const localFilePath = import_path.default.join(localFolderDir, uniqueFileName);
-      import_fs.default.writeFileSync(localFilePath, file.buffer);
-      const downloadUrl2 = `/uploads/${folder}/${uniqueFileName}`;
-      console.log(`[API UPLOAD] Local fallback upload completed! URL: ${downloadUrl2}`);
-      return res.json({
-        success: true,
-        downloadUrl: downloadUrl2,
-        fileName: file.originalname,
-        size: file.size,
-        isLocalFallback: true
+      console.error("[API UPLOAD] Failed to upload to any Firebase Storage bucket. Error:", lastError);
+      return res.status(500).json({
+        success: false,
+        error: `\u0641\u0634\u0644 \u0631\u0641\u0639 \u0627\u0644\u0645\u0644\u0641 \u0625\u0644\u0649 Firebase Storage. \u064A\u0631\u062C\u0649 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u062A\u0641\u0639\u064A\u0644 \u062E\u062F\u0645\u0629 \u0627\u0644\u062A\u062E\u0632\u064A\u0646 \u0641\u064A \u0643\u0648\u0646\u0633\u0648\u0644 Firebase \u0648\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0642\u0648\u0627\u0639\u062F \u0627\u0644\u062D\u0645\u0627\u064A\u0629 (storage.rules). \u062A\u0641\u0627\u0635\u064A\u0644 \u0627\u0644\u062E\u0637\u0623 \u0627\u0644\u0623\u062E\u064A\u0631: ${lastError?.message || "\u063A\u064A\u0631 \u0645\u0639\u0631\u0648\u0641"}`
       });
     }
-    const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${successfulBucket}/o/${encodeURIComponent(objectPath)}?alt=media&token=${downloadToken}`;
     console.log(`[API UPLOAD] Upload successful! Generated URL: ${downloadUrl}`);
     res.json({
       success: true,
