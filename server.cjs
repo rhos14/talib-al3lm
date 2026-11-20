@@ -22,6 +22,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // server.ts
+var import_config = require("dotenv/config");
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_fs = __toESM(require("fs"), 1);
@@ -34,7 +35,7 @@ var import_app2 = require("firebase-admin/app");
 var import_auth = require("firebase-admin/auth");
 var import_firestore = require("firebase/firestore");
 var app = (0, import_express.default)();
-var PORT = 3e3;
+var PORT = Number(process.env.PORT) || 3e3;
 process.on("uncaughtException", (err) => {
   console.error("[SERVER UNCAUGHT EXCEPTION]:", err);
 });
@@ -156,12 +157,14 @@ async function verifyFirebaseToken(token) {
       const email = (decoded.email || "").toLowerCase();
       const emailVerified = !!decoded.email_verified;
       const isAdminClaim = decoded.admin === true || decoded.role === "admin";
+      const isAnonymous = decoded.firebase?.sign_in_provider === "anonymous";
       return {
         valid: true,
         uid: decoded.uid,
         email,
         emailVerified,
         isAdmin: isAdminClaim,
+        isAnonymous,
         claims: decoded
       };
     } catch (adminErr) {
@@ -214,12 +217,14 @@ async function verifyFirebaseToken(token) {
           } catch {
           }
         }
+        const isAnonymous = !email && (!Array.isArray(userObj.providerUserInfo) || userObj.providerUserInfo.length === 0);
         return {
           valid: true,
           uid: userObj.localId,
           email,
           emailVerified,
           isAdmin: isAdminClaim,
+          isAnonymous,
           claims: parsedClaims
         };
       } else {
@@ -1448,6 +1453,377 @@ app.post("/api/import/questions", importRateLimiter, async (req, res) => {
     });
   }
 });
+var IMAGEKIT_URL_ENDPOINT = (process.env.IMAGEKIT_URL_ENDPOINT || "https://ik.imagekit.io/fvxlchn3o").replace(/\/+$/, "");
+var IMAGEKIT_UPLOAD_API_URL = "https://upload.imagekit.io/api/v1/files/upload";
+var IMAGEKIT_FILES_API_URL = "https://api.imagekit.io/v1/files";
+var IMAGEKIT_AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+var IMAGEKIT_COVER_MAX_BYTES = 10 * 1024 * 1024;
+var IMAGEKIT_ROOT_FOLDER = "/talaba-elm";
+var imageMediaRateLimiter = createRateLimiter({
+  windowMs: 60 * 1e3,
+  maxRequests: 25,
+  message: "\u062A\u0645 \u062A\u062C\u0627\u0648\u0632 \u0627\u0644\u062D\u062F \u0627\u0644\u0645\u0633\u0645\u0648\u062D \u0628\u0647 \u0644\u0637\u0644\u0628\u0627\u062A \u0631\u0641\u0639 \u0623\u0648 \u062D\u0630\u0641 \u0627\u0644\u0635\u0648\u0631 \u0645\u0624\u0642\u062A\u0627\u064B. \u064A\u0631\u062C\u0649 \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631 \u0642\u0644\u064A\u0644\u0627\u064B."
+});
+function getImageKitPrivateKey() {
+  const raw = (process.env.IMAGEKIT_PRIVATE_KEY || "").trim();
+  if (!raw || raw === "MY_IMAGEKIT_PRIVATE_KEY_SERVER_ONLY") {
+    return null;
+  }
+  return raw;
+}
+function buildImageKitBasicAuthHeader(privateKey) {
+  return `Basic ${Buffer.from(`${privateKey}:`).toString("base64")}`;
+}
+function detectImageFormatFromBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  const headText = buf.subarray(0, Math.min(buf.length, 256)).toString("utf8").trimStart().toLowerCase();
+  if (headText.startsWith("<svg") || headText.startsWith("<!doctype") || headText.startsWith("<html") || headText.startsWith("<?xml") || headText.startsWith("<script")) {
+    return null;
+  }
+  if (buf[0] === 255 && buf[1] === 216 && buf[2] === 255) {
+    return { format: "jpeg", mime: "image/jpeg", ext: "jpg" };
+  }
+  if (buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    return { format: "png", mime: "image/png", ext: "png" };
+  }
+  if (buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") {
+    return { format: "webp", mime: "image/webp", ext: "webp" };
+  }
+  return null;
+}
+function isSafeUidSegment(uid) {
+  return Boolean(uid && /^[a-zA-Z0-9_-]{3,128}$/.test(uid));
+}
+function parseImagePurpose(raw) {
+  const val = String(raw || "").trim();
+  if (val === "avatar" || val === "course_cover" || val === "book_cover") {
+    return val;
+  }
+  return null;
+}
+function resolveAuthoritativeImagePolicy(purpose, uid) {
+  if (purpose === "avatar") {
+    return {
+      folder: `${IMAGEKIT_ROOT_FOLDER}/user_avatars/${uid}`,
+      maxBytes: IMAGEKIT_AVATAR_MAX_BYTES,
+      isAdminOnly: false
+    };
+  }
+  if (purpose === "course_cover") {
+    return {
+      folder: `${IMAGEKIT_ROOT_FOLDER}/course_covers`,
+      maxBytes: IMAGEKIT_COVER_MAX_BYTES,
+      isAdminOnly: true
+    };
+  }
+  return {
+    folder: `${IMAGEKIT_ROOT_FOLDER}/book_covers`,
+    maxBytes: IMAGEKIT_COVER_MAX_BYTES,
+    isAdminOnly: true
+  };
+}
+app.post(
+  "/api/images/upload",
+  imageMediaRateLimiter,
+  import_express.default.raw({ type: "*/*", limit: "11mb" }),
+  async (req, res) => {
+    const purpose = parseImagePurpose(req.query.purpose || req.headers["x-image-purpose"]);
+    if (!purpose) {
+      return res.status(400).json({
+        success: false,
+        code: "imagekit/invalid-purpose",
+        error: "\u063A\u0631\u0636 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631\u0629 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D. \u0627\u0644\u0642\u064A\u0645 \u0627\u0644\u0645\u0633\u0645\u0648\u062D\u0629: avatar\u060C course_cover\u060C book_cover."
+      });
+    }
+    const authHeader = req.headers["authorization"];
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        code: "auth/unauthenticated",
+        error: "\u064A\u062C\u0628 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0623\u0648\u0644\u0627\u064B \u0642\u0628\u0644 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631."
+      });
+    }
+    const token = authHeader.substring(7).trim();
+    const tokenResult = await verifyFirebaseToken(token);
+    if (!tokenResult.valid || !tokenResult.uid) {
+      return res.status(401).json({
+        success: false,
+        code: "auth/invalid-token",
+        error: tokenResult.reason || "\u062C\u0644\u0633\u0629 \u0627\u0644\u062F\u062E\u0648\u0644 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D\u0629 \u0623\u0648 \u0645\u0646\u062A\u0647\u064A\u0629 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0629."
+      });
+    }
+    if (tokenResult.isAnonymous) {
+      return res.status(403).json({
+        success: false,
+        code: "auth/anonymous-forbidden",
+        error: "\u062D\u0633\u0627\u0628 \u0627\u0644\u0632\u0627\u0626\u0631 \u0644\u0627 \u064A\u0645\u0644\u0643 \u0635\u0644\u0627\u062D\u064A\u0629 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631."
+      });
+    }
+    const requestedTargetUid = String(
+      req.query.targetUid || req.query.uid || req.headers["x-target-uid"] || ""
+    ).trim();
+    if (requestedTargetUid && requestedTargetUid !== tokenResult.uid) {
+      return res.status(403).json({
+        success: false,
+        code: "auth/cross-user-forbidden",
+        error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D: \u0644\u0627 \u064A\u0645\u0643\u0646\u0643 \u0627\u0633\u062A\u0647\u062F\u0627\u0641 \u0645\u062C\u0644\u062F \u0645\u0633\u062A\u062E\u062F\u0645 \u0622\u062E\u0631."
+      });
+    }
+    const requestedFolder = String(
+      req.query.folder || req.headers["x-upload-folder"] || ""
+    ).trim();
+    if (requestedFolder) {
+      return res.status(403).json({
+        success: false,
+        code: "auth/folder-override-forbidden",
+        error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D \u0644\u0644\u0639\u0645\u064A\u0644 \u0628\u062A\u062D\u062F\u064A\u062F \u0623\u0648 \u062A\u063A\u064A\u064A\u0631 \u0645\u062C\u0644\u062F \u0627\u0644\u062A\u062E\u0632\u064A\u0646."
+      });
+    }
+    if (!isSafeUidSegment(tokenResult.uid)) {
+      return res.status(400).json({
+        success: false,
+        code: "auth/invalid-uid",
+        error: "\u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D."
+      });
+    }
+    const policy = resolveAuthoritativeImagePolicy(purpose, tokenResult.uid);
+    if (policy.isAdminOnly) {
+      const adminCheck = await verifyAdminRequest(req);
+      if (!adminCheck.authorized) {
+        return res.status(403).json({
+          success: false,
+          code: "auth/admin-required",
+          error: adminCheck.reason || "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D: \u0631\u0641\u0639 \u0623\u063A\u0644\u0641\u0629 \u0627\u0644\u062F\u0648\u0631\u0627\u062A \u0648\u0627\u0644\u0643\u062A\u0628 \u0645\u062D\u0635\u0648\u0631 \u0628\u0627\u0644\u0645\u0634\u0631\u0641\u0629 \u0627\u0644\u0645\u062E\u0648\u0644\u0629 \u0641\u0642\u0637."
+        });
+      }
+    }
+    const fileBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (fileBuffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        code: "validation/empty-file",
+        error: "\u0645\u0644\u0641 \u0627\u0644\u0635\u0648\u0631\u0629 \u0641\u0627\u0631\u063A \u0623\u0648 \u0644\u0645 \u062A\u0635\u0644 \u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0645\u0644\u0641."
+      });
+    }
+    if (fileBuffer.length > policy.maxBytes) {
+      const maxMb = Math.round(policy.maxBytes / (1024 * 1024));
+      return res.status(413).json({
+        success: false,
+        code: "validation/file-too-large",
+        error: `\u062D\u062C\u0645 \u0627\u0644\u0635\u0648\u0631\u0629 \u064A\u062A\u062C\u0627\u0648\u0632 \u0627\u0644\u062D\u062F \u0627\u0644\u0623\u0642\u0635\u0649 \u0627\u0644\u0645\u0633\u0645\u0648\u062D (${maxMb} \u0645\u064A\u062C\u0627\u0628\u0627\u064A\u062A).`
+      });
+    }
+    const detected = detectImageFormatFromBuffer(fileBuffer);
+    if (!detected) {
+      return res.status(415).json({
+        success: false,
+        code: "validation/invalid-image-signature",
+        error: "\u0645\u062D\u062A\u0648\u0649 \u0627\u0644\u0645\u0644\u0641 \u0627\u0644\u0641\u0639\u0644\u064A \u0644\u064A\u0633 \u0635\u0648\u0631\u0629 \u0635\u0627\u0644\u062D\u0629. \u0627\u0644\u0635\u064A\u063A \u0627\u0644\u0645\u062F\u0639\u0648\u0645\u0629 \u0641\u0642\u0637: JPG\u060C JPEG\u060C PNG\u060C WebP."
+      });
+    }
+    const privateKey = getImageKitPrivateKey();
+    if (!privateKey) {
+      return res.status(503).json({
+        success: false,
+        code: "imagekit/not-configured",
+        error: "\u062E\u062F\u0645\u0629 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631 (ImageKit) \u063A\u064A\u0631 \u0645\u0647\u064A\u0623\u0629 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0628\u0639\u062F: \u0645\u062A\u063A\u064A\u0631 \u0627\u0644\u0628\u064A\u0626\u0629 \u0627\u0644\u0633\u0631\u064A IMAGEKIT_PRIVATE_KEY \u0645\u0641\u0642\u0648\u062F."
+      });
+    }
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 3e4);
+    const onClientClose = () => {
+      if (!res.writableEnded) {
+        abortController.abort();
+      }
+    };
+    res.on("close", onClientClose);
+    try {
+      const safeFileName = `${purpose}_${Date.now()}_${import_crypto.default.randomBytes(6).toString("hex")}.${detected.ext}`;
+      const formData = new FormData();
+      formData.append("file", new Blob([fileBuffer], { type: detected.mime }), safeFileName);
+      formData.append("fileName", safeFileName);
+      formData.append("folder", policy.folder);
+      formData.append("useUniqueFileName", "false");
+      const ikRes = await fetch(IMAGEKIT_UPLOAD_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: buildImageKitBasicAuthHeader(privateKey)
+        },
+        body: formData,
+        signal: abortController.signal
+      });
+      const rawText = await ikRes.text();
+      let ikJson = null;
+      try {
+        ikJson = JSON.parse(rawText);
+      } catch {
+        ikJson = null;
+      }
+      if (!ikRes.ok || !ikJson?.url || !ikJson?.fileId) {
+        const providerMsg = ikJson?.message || `\u0641\u0634\u0644 \u062E\u0627\u062F\u0645 \u0627\u0644\u0635\u0648\u0631 \u0628\u0627\u0644\u0627\u0633\u062A\u062C\u0627\u0628\u0629 (${ikRes.status}).`;
+        return res.status(ikRes.status >= 400 && ikRes.status < 500 ? ikRes.status : 502).json({
+          success: false,
+          code: "imagekit/upload-failed",
+          error: providerMsg
+        });
+      }
+      const returnedUrl = String(ikJson.url).trim();
+      const returnedFileId = String(ikJson.fileId).trim();
+      const returnedPath = String(ikJson.filePath || "").trim();
+      if (!returnedUrl.startsWith(IMAGEKIT_URL_ENDPOINT)) {
+        return res.status(502).json({
+          success: false,
+          code: "imagekit/unexpected-endpoint",
+          error: "\u0627\u0644\u0631\u0627\u0628\u0637 \u0627\u0644\u0639\u0627\u0626\u062F \u0645\u0646 \u062E\u062F\u0645\u0629 \u0627\u0644\u0635\u0648\u0631 \u0644\u0627 \u064A\u0637\u0627\u0628\u0642 \u0646\u0637\u0627\u0642 \u0627\u0644\u0645\u0646\u0635\u0629 \u0627\u0644\u0645\u0639\u062A\u0645\u062F."
+        });
+      }
+      return res.json({
+        success: true,
+        url: returnedUrl,
+        fileId: returnedFileId,
+        filePath: returnedPath,
+        size: typeof ikJson.size === "number" ? ikJson.size : fileBuffer.length,
+        format: detected.format
+      });
+    } catch (uploadErr) {
+      if (abortController.signal.aborted) {
+        return res.status(499).json({
+          success: false,
+          code: "imagekit/canceled",
+          error: "\u062A\u0645 \u0625\u0644\u063A\u0627\u0621 \u0639\u0645\u0644\u064A\u0629 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631\u0629 \u0623\u0648 \u0627\u0646\u062A\u0647\u062A \u0645\u0647\u0644\u0629 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u0627\u0644\u062E\u0627\u062F\u0645."
+        });
+      }
+      console.error("[IMAGEKIT UPLOAD ERROR]:", uploadErr?.message || "Upload error");
+      return res.status(502).json({
+        success: false,
+        code: "imagekit/network-error",
+        error: "\u062A\u0639\u0630\u0631 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u062E\u062F\u0645\u0629 ImageKit \u0644\u0625\u062A\u0645\u0627\u0645 \u0631\u0641\u0639 \u0627\u0644\u0635\u0648\u0631\u0629."
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      res.off("close", onClientClose);
+    }
+  }
+);
+app.post("/api/images/delete", imageMediaRateLimiter, async (req, res) => {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      success: false,
+      code: "auth/unauthenticated",
+      error: "\u064A\u062C\u0628 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0623\u0648\u0644\u0627\u064B."
+    });
+  }
+  const token = authHeader.substring(7).trim();
+  const tokenResult = await verifyFirebaseToken(token);
+  if (!tokenResult.valid || !tokenResult.uid) {
+    return res.status(401).json({
+      success: false,
+      code: "auth/invalid-token",
+      error: tokenResult.reason || "\u0631\u0645\u0632 \u0627\u0644\u0645\u0635\u0627\u062F\u0642\u0629 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D."
+    });
+  }
+  if (tokenResult.isAnonymous) {
+    return res.status(403).json({
+      success: false,
+      code: "auth/anonymous-forbidden",
+      error: "\u062D\u0633\u0627\u0628 \u0627\u0644\u0632\u0627\u0626\u0631 \u0644\u0627 \u064A\u0645\u0644\u0643 \u0635\u0644\u0627\u062D\u064A\u0629 \u062D\u0630\u0641 \u0627\u0644\u0635\u0648\u0631."
+    });
+  }
+  if (!isSafeUidSegment(tokenResult.uid)) {
+    return res.status(400).json({
+      success: false,
+      code: "auth/invalid-uid",
+      error: "\u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D."
+    });
+  }
+  const purpose = parseImagePurpose(req.body?.purpose);
+  if (!purpose) {
+    return res.status(400).json({
+      success: false,
+      code: "imagekit/invalid-purpose",
+      error: "\u063A\u0631\u0636 \u062D\u0630\u0641 \u0627\u0644\u0635\u0648\u0631\u0629 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D."
+    });
+  }
+  const fileId = String(req.body?.fileId || "").trim();
+  if (!/^[a-zA-Z0-9_-]{6,120}$/.test(fileId)) {
+    return res.status(400).json({
+      success: false,
+      code: "imagekit/invalid-file-id",
+      error: "\u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0645\u0644\u0641 (fileId) \u063A\u064A\u0631 \u0635\u0627\u0644\u062D."
+    });
+  }
+  if (purpose === "course_cover" || purpose === "book_cover") {
+    const adminCheck = await verifyAdminRequest(req);
+    if (!adminCheck.authorized) {
+      return res.status(403).json({
+        success: false,
+        code: "auth/admin-required",
+        error: adminCheck.reason || "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D: \u062D\u0630\u0641 \u0623\u063A\u0644\u0641\u0629 \u0627\u0644\u062F\u0648\u0631\u0627\u062A \u0648\u0627\u0644\u0643\u062A\u0628 \u0644\u0644\u0645\u0634\u0631\u0641\u0629 \u0627\u0644\u0645\u062E\u0648\u0644\u0629 \u0641\u0642\u0637."
+      });
+    }
+  }
+  const privateKey = getImageKitPrivateKey();
+  if (!privateKey) {
+    return res.status(503).json({
+      success: false,
+      code: "imagekit/not-configured",
+      error: "\u062E\u062F\u0645\u0629 ImageKit \u063A\u064A\u0631 \u0645\u0647\u064A\u0623\u0629 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 (IMAGEKIT_PRIVATE_KEY \u0645\u0641\u0642\u0648\u062F)."
+    });
+  }
+  const authHeaderValue = buildImageKitBasicAuthHeader(privateKey);
+  try {
+    const detailsRes = await fetch(
+      `${IMAGEKIT_FILES_API_URL}/${encodeURIComponent(fileId)}/details`,
+      {
+        method: "GET",
+        headers: { Authorization: authHeaderValue }
+      }
+    );
+    if (detailsRes.status === 404) {
+      return res.json({ success: true, alreadyDeleted: true });
+    }
+    if (!detailsRes.ok) {
+      return res.status(502).json({
+        success: false,
+        code: "imagekit/details-failed",
+        error: "\u062A\u0639\u0630\u0631 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u0645\u0644\u0643\u064A\u0629 \u0627\u0644\u0645\u0644\u0641 \u0639\u0644\u0649 ImageKit."
+      });
+    }
+    const detailsJson = await detailsRes.json();
+    const authoritativePath = String(detailsJson?.filePath || "");
+    const expectedPrefix = purpose === "avatar" ? `${IMAGEKIT_ROOT_FOLDER}/user_avatars/${tokenResult.uid}/` : purpose === "course_cover" ? `${IMAGEKIT_ROOT_FOLDER}/course_covers/` : `${IMAGEKIT_ROOT_FOLDER}/book_covers/`;
+    if (!authoritativePath.startsWith(expectedPrefix) || authoritativePath.includes("..")) {
+      return res.status(403).json({
+        success: false,
+        code: "auth/ownership-mismatch",
+        error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D: \u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0635\u0648\u0631\u0629 \u0644\u0627 \u064A\u062A\u0628\u0639 \u0644\u062D\u0633\u0627\u0628\u0643 \u0623\u0648 \u0644\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0645\u0637\u0644\u0648\u0628."
+      });
+    }
+    const deleteRes = await fetch(
+      `${IMAGEKIT_FILES_API_URL}/${encodeURIComponent(fileId)}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: authHeaderValue }
+      }
+    );
+    if (deleteRes.status === 204 || deleteRes.status === 200 || deleteRes.status === 404) {
+      return res.json({ success: true, deletedFileId: fileId });
+    }
+    return res.status(502).json({
+      success: false,
+      code: "imagekit/delete-failed",
+      error: `\u062A\u0639\u0630\u0631 \u062D\u0630\u0641 \u0627\u0644\u0635\u0648\u0631\u0629 \u0645\u0646 ImageKit (${deleteRes.status}).`
+    });
+  } catch (err) {
+    console.error("[IMAGEKIT DELETE ERROR]:", err?.message || "Delete error");
+    return res.status(502).json({
+      success: false,
+      code: "imagekit/network-error",
+      error: "\u062A\u0639\u0630\u0631 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u062E\u062F\u0645\u0629 ImageKit \u0644\u062A\u0646\u0641\u064A\u0630 \u0627\u0644\u062D\u0630\u0641."
+    });
+  }
+});
 app.all("/api/*", (req, res) => {
   console.warn(`[API 404] Unmatched API request received: ${req.method} ${req.url}`);
   res.status(404).json({
@@ -1456,7 +1832,14 @@ app.all("/api/*", (req, res) => {
   });
 });
 app.use((err, req, res, next) => {
-  console.error("[GLOBAL ERROR HANDLER] Caught error:", err);
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      success: false,
+      code: "validation/file-too-large",
+      error: "\u062D\u062C\u0645 \u0627\u0644\u0635\u0648\u0631\u0629 \u064A\u062A\u062C\u0627\u0648\u0632 \u0627\u0644\u062D\u062F \u0627\u0644\u0623\u0642\u0635\u0649 \u0627\u0644\u0645\u0633\u0645\u0648\u062D \u0628\u0647 \u0644\u0644\u0631\u0641\u0639."
+    });
+  }
+  console.error("[GLOBAL ERROR HANDLER] Caught error:", err?.message || err);
   res.status(err.status || 500).json({
     success: false,
     error: err.message || "\u062D\u062F\u062B \u062E\u0637\u0623 \u063A\u064A\u0631 \u0645\u062A\u0648\u0642\u0639 \u0641\u064A \u0627\u0644\u062E\u0627\u062F\u0645",
