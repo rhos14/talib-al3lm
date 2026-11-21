@@ -43,6 +43,84 @@ process.on("unhandledRejection", (reason) => {
   console.error("[SERVER UNHANDLED REJECTION]:", reason);
 });
 app.use(import_express.default.json({ limit: "10mb" }));
+var DEFAULT_GITHUB_PAGES_ORIGIN = "https://rhos14.github.io";
+function parseAllowedCorsOrigins() {
+  const allowed = /* @__PURE__ */ new Set();
+  const configuredOrigin = process.env.CORS_ALLOWED_ORIGIN || process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_ORIGIN || "";
+  const rawSources = [
+    configuredOrigin.trim() ? configuredOrigin : DEFAULT_GITHUB_PAGES_ORIGIN,
+    process.env.APP_URL || ""
+  ];
+  for (const source of rawSources) {
+    for (const part of source.split(",")) {
+      const candidate = part.trim().replace(/\/+$/, "");
+      if (!candidate || candidate === "*") continue;
+      try {
+        const parsed = new URL(candidate);
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          allowed.add(parsed.origin);
+        }
+      } catch {
+      }
+    }
+  }
+  if (process.env.NODE_ENV !== "production") {
+    allowed.add("http://localhost:3000");
+    allowed.add("http://127.0.0.1:3000");
+  }
+  return allowed;
+}
+function isSameServerOrigin(originHeader, req) {
+  const hostHeader = typeof req.headers.host === "string" ? req.headers.host.trim().toLowerCase() : "";
+  if (!hostHeader) return false;
+  try {
+    const parsedOrigin = new URL(originHeader);
+    return parsedOrigin.host.toLowerCase() === hostHeader;
+  } catch {
+    return false;
+  }
+}
+function apiCorsMiddleware(req, res, next) {
+  const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+  if (!originHeader) {
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(204);
+    }
+    return next();
+  }
+  res.setHeader("Vary", "Origin");
+  let normalizedOrigin = "";
+  try {
+    const parsed = new URL(originHeader);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      normalizedOrigin = parsed.origin;
+    }
+  } catch {
+    normalizedOrigin = "";
+  }
+  const allowedOrigins = parseAllowedCorsOrigins();
+  const isAllowed = Boolean(normalizedOrigin) && (allowedOrigins.has(normalizedOrigin) || isSameServerOrigin(normalizedOrigin, req));
+  if (!isAllowed) {
+    return res.status(403).json({
+      success: false,
+      code: "cors/origin-forbidden",
+      error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D \u0628\u0627\u0644\u0648\u0635\u0648\u0644 \u0645\u0646 \u0647\u0630\u0627 \u0627\u0644\u0646\u0637\u0627\u0642 \u0648\u0641\u0642 \u0633\u064A\u0627\u0633\u0629 CORS."
+    });
+  }
+  res.setHeader("Access-Control-Allow-Origin", normalizedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, X-File-Name, X-Image-Purpose, x-admin-key, x-import-api-key, Range"
+  );
+  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, Retry-After");
+  res.setHeader("Access-Control-Max-Age", "600");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  return next();
+}
+app.use("/api", apiCorsMiddleware);
 var firebaseConfig = {};
 try {
   const configPath = import_path.default.join(process.cwd(), "firebase-applet-config.json");
@@ -55,10 +133,17 @@ try {
 }
 var firebaseApp = (0, import_app.initializeApp)(firebaseConfig);
 var adminAuth = null;
+var configuredGacPath = (process.env.GOOGLE_APPLICATION_CREDENTIALS || "").trim();
+var hasConfiguredServiceAccountFile = Boolean(configuredGacPath && import_fs.default.existsSync(configuredGacPath));
+if (configuredGacPath && !hasConfiguredServiceAccountFile) {
+  console.warn("[Firebase Admin] GOOGLE_APPLICATION_CREDENTIALS is set, but the target credentials file does not exist at runtime.");
+}
 try {
   const adminApp = (0, import_app2.getApps)().length === 0 ? (0, import_app2.initializeApp)({ projectId: firebaseConfig.projectId || "tlb-ilm-r" }) : (0, import_app2.getApps)()[0];
   adminAuth = (0, import_auth.getAuth)(adminApp);
-  console.log("Firebase Admin Auth SDK initialized successfully.");
+  console.log(
+    `Firebase Admin Auth SDK initialized successfully (credentialsMode=${hasConfiguredServiceAccountFile ? "service_account_file" : "ambient_adc_or_fallback"}).`
+  );
 } catch (adminInitErr) {
   console.warn("Notice: Firebase Admin SDK initialization fallback:", adminInitErr);
 }
@@ -127,10 +212,18 @@ var importRateLimiter = createRateLimiter({
   maxRequests: 30,
   message: "\u062A\u0645 \u062A\u062C\u0627\u0648\u0632 \u0627\u0644\u062D\u062F \u0627\u0644\u0645\u0633\u0645\u0648\u062D \u0628\u0647 \u0644\u0637\u0644\u0628\u0627\u062A \u0627\u0644\u0627\u0633\u062A\u064A\u0631\u0627\u062F (30 \u0637\u0644\u0628\u0627\u064B \u0641\u064A \u0627\u0644\u062F\u0642\u064A\u0642\u0629)."
 });
+var warnedMissingEnvImportKey = false;
 async function getOrInitAdminApiKey() {
   const envKey = process.env.IMPORT_API_KEY || process.env.ADMIN_SECRET_KEY;
   if (envKey && envKey.trim()) {
     return envKey.trim();
+  }
+  if (process.env.NODE_ENV === "production") {
+    if (!warnedMissingEnvImportKey) {
+      warnedMissingEnvImportKey = true;
+      console.warn("[IMPORT API KEY] IMPORT_API_KEY is not configured in environment; ephemeral file fallback is disabled in production.");
+    }
+    return null;
   }
   try {
     const keyPath = import_path.default.join(process.cwd(), ".import-api-key");
@@ -341,7 +434,13 @@ app.post("/api/admin/claims/sync-self", adminRateLimiter, async (req, res) => {
   }
   try {
     if (tokenResult.uid) {
-      await safeSetCustomUserClaims(tokenResult.uid, { admin: true });
+      const claimsUpdated = await safeSetCustomUserClaims(tokenResult.uid, { admin: true });
+      if (!claimsUpdated) {
+        return res.status(503).json({
+          success: false,
+          error: "\u062A\u0639\u0630\u0631 \u062D\u0641\u0638 Custom Claims \u0641\u064A Firebase Auth \u0644\u0639\u062F\u0645 \u062A\u0648\u0641\u0631 \u062A\u0641\u0648\u064A\u0636 Firebase Admin (GOOGLE_APPLICATION_CREDENTIALS)."
+        });
+      }
       const currentAdmins = getAdminRegistry();
       if (!currentAdmins.includes(tokenResult.uid)) {
         currentAdmins.push(tokenResult.uid);
@@ -393,7 +492,13 @@ app.post("/api/admin/claims/grant", adminRateLimiter, async (req, res) => {
   }
   try {
     const cleanUid = targetUid.trim();
-    await safeSetCustomUserClaims(cleanUid, { admin: true });
+    const claimsUpdated = await safeSetCustomUserClaims(cleanUid, { admin: true });
+    if (!claimsUpdated) {
+      return res.status(503).json({
+        success: false,
+        error: "\u062A\u0639\u0630\u0631 \u062A\u062B\u0628\u064A\u062A \u0635\u0644\u0627\u062D\u064A\u0629 \u0627\u0644\u0645\u0634\u0631\u0641\u0629 \u0641\u064A Firebase Auth \u0644\u0639\u062F\u0645 \u062A\u0648\u0641\u0631 \u062A\u0641\u0648\u064A\u0636 Firebase Admin (GOOGLE_APPLICATION_CREDENTIALS)\u061B \u0644\u0646 \u064A\u062A\u0645 \u0627\u0644\u0627\u0639\u062A\u0645\u0627\u062F \u0639\u0644\u0649 \u0627\u0644\u0633\u062C\u0644 \u0627\u0644\u0645\u062D\u0644\u064A \u0627\u0644\u0645\u0624\u0642\u062A."
+      });
+    }
     const currentAdmins = getAdminRegistry();
     if (!currentAdmins.includes(cleanUid)) {
       currentAdmins.push(cleanUid);
@@ -420,7 +525,13 @@ app.post("/api/admin/claims/revoke", adminRateLimiter, async (req, res) => {
   }
   const cleanUid = targetUid.trim();
   try {
-    await safeSetCustomUserClaims(cleanUid, { admin: false });
+    const claimsUpdated = await safeSetCustomUserClaims(cleanUid, { admin: false });
+    if (!claimsUpdated) {
+      return res.status(503).json({
+        success: false,
+        error: "\u062A\u0639\u0630\u0631 \u0625\u0644\u063A\u0627\u0621 \u0635\u0644\u0627\u062D\u064A\u0629 \u0627\u0644\u0645\u0634\u0631\u0641\u0629 \u0645\u0646 Firebase Auth \u0644\u0639\u062F\u0645 \u062A\u0648\u0641\u0631 \u062A\u0641\u0648\u064A\u0636 Firebase Admin (GOOGLE_APPLICATION_CREDENTIALS)."
+      });
+    }
     const currentAdmins = getAdminRegistry().filter((id) => id !== cleanUid);
     saveAdminRegistry(currentAdmins);
     res.json({
@@ -704,10 +815,14 @@ app.post("/api/student/quiz/submit", async (req, res) => {
   }
 });
 var uploadsDir = import_path.default.join(process.cwd(), "uploads");
-if (!import_fs.default.existsSync(uploadsDir)) {
-  import_fs.default.mkdirSync(uploadsDir, { recursive: true });
+try {
+  if (!import_fs.default.existsSync(uploadsDir)) {
+    import_fs.default.mkdirSync(uploadsDir, { recursive: true });
+  }
+  app.use("/uploads", import_express.default.static(uploadsDir));
+} catch (uploadsErr) {
+  console.warn("Notice: Could not initialize optional local uploads directory:", uploadsErr);
 }
-app.use("/uploads", import_express.default.static(uploadsDir));
 app.get("/api/test-server", (req, res) => {
   res.json({ status: "ok", message: "Express server is fully active!" });
 });
@@ -771,9 +886,6 @@ function streamRemoteUrl(targetUrl, reqHeaders, res, redirectCount = 0) {
         return streamRemoteUrl(redirectUrl, reqHeaders, res, redirectCount + 1);
       }
       res.setHeader("Content-Type", proxyRes.headers["content-type"] || "application/octet-stream");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
       res.setHeader("Accept-Ranges", "bytes");
       if (proxyRes.headers["content-length"]) {
         res.setHeader("Content-Length", proxyRes.headers["content-length"]);
