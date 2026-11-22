@@ -1,0 +1,162 @@
+rules_version = '2';
+
+// قواعد أمان متقدمة وصارمة لـ Firebase Storage في منصة «طلبة العلم» (المرحلة D)
+// الحماية تشمل:
+// 1. إدارة المشرفة الحصرية عبر Custom Claims الصادرة من الخادم الموثق (request.auth.token.admin == true).
+// 2. التحقق المسبق الصارم من تسجيل الدخول (request.auth != null).
+// 3. منع القراءة العامة للشهادات الأكاديمية وحصر قراءتها على صاحبة الشهادة والمشرفة، وحصر إنشائها وتعديلها وحذفها على المشرفة فقط.
+// 4. حماية صور الطالبات الرمزية: حجم أقصى 5MB، أنواع MIME محددة وآمنة، منع الكتابة على مجلدات الطالبات الأخريات.
+// 5. حماية الوسائط التعليمية (الأغلفة، ملفات الكتب PDF، الشروحات الصوتية والمرئية): قراءة عامة للتعلم وكتابة حصرية للمشرفة مع تدقيق النوع والحجم.
+// 6. الإغلاق الافتراضي التام والآمن لأي مسار غير معرف (Default Deny).
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // التحقق من تسجيل الدخول المسبق
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // التحقق الصارم من رتبة المشرفة عبر Custom Claims دون الاعتماد على البريد أو العميل
+    function isAdmin() {
+      return isAuthenticated() &&
+             request.auth.token.keys().hasAll(['admin']) &&
+             request.auth.token.admin == true;
+    }
+
+    // التحقق من صحة ملفات الصور (أغلفة، شارات، صور شخصية)
+    function isValidImage(maxBytes) {
+      return request.resource != null &&
+             request.resource.size > 0 &&
+             request.resource.size <= maxBytes &&
+             request.resource.contentType.matches('image/(jpeg|png|webp|gif)');
+    }
+
+    // التحقق من صحة ملفات المستندات والكتب PDF
+    function isValidPdf(maxBytes) {
+      return request.resource != null &&
+             request.resource.size > 0 &&
+             request.resource.size <= maxBytes &&
+             request.resource.contentType == 'application/pdf';
+    }
+
+    // التحقق من صحة الملفات الصوتية (الشروحات المسجلة)
+    function isValidAudio(maxBytes) {
+      return request.resource != null &&
+             request.resource.size > 0 &&
+             request.resource.size <= maxBytes &&
+             request.resource.contentType.matches('audio/(mpeg|mp3|wav|ogg|aac|m4a|mp4)');
+    }
+
+    // التحقق من صحة الملفات المرئية (المحاضرات المرئية)
+    function isValidVideo(maxBytes) {
+      return request.resource != null &&
+             request.resource.size > 0 &&
+             request.resource.size <= maxBytes &&
+             request.resource.contentType.matches('video/(mp4|webm|ogg|quicktime)');
+    }
+
+    // التحقق من صحة ملفات الشهادات الصادرة (PDF أو صورة عالية الجودة)
+    function isValidCertificateFile(maxBytes) {
+      return request.resource != null &&
+             request.resource.size > 0 &&
+             request.resource.size <= maxBytes &&
+             (request.resource.contentType == 'application/pdf' ||
+              request.resource.contentType.matches('image/(jpeg|png|webp)'));
+    }
+
+    // =========================================================================
+    // 1. صور الطالبات الشخصية والرمزية (User Avatars)
+    // =========================================================================
+    // ترفع الطالبة صورتها إلى مجلدها الخاص فقط بحجم أقصى 5MB وصيغ صور سليمة
+    // القراءة متاحة للمستخدمين المسجلين في المنصة وللمشرفة ولصاحبة الصورة
+    match /user_avatars/{userId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() &&
+                              (request.auth.uid == userId || isAdmin()) &&
+                              isValidImage(5 * 1024 * 1024);
+      allow delete: if isAuthenticated() &&
+                              (request.auth.uid == userId || isAdmin());
+    }
+
+    // =========================================================================
+    // 2. الشهادات الأكاديمية الرسمية الصادرة (Certificates)
+    // =========================================================================
+    // أ) شهادات منظمة بمسار الطالبة: /certificates/{userId}/{fileName}
+    // تسمح للطالبة المعنية بقراءة شهادتها فقط، والمشرفة بالإدارة الكاملة
+    match /certificates/{userId}/{fileName} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin() && isValidCertificateFile(15 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // ب) شهادات على المسار العام: /certificates/{fileName}
+    // مخصصة للمشرفة فقط في الرفع والحذف، وقراءتها محصورة على المشرفة أو الطالبة المعنية عبر الميتاداتا
+    match /certificates/{fileName} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        (resource != null && resource.metadata != null && resource.metadata.studentId == request.auth.uid)
+      );
+      allow write: if isAdmin() && isValidCertificateFile(15 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 3. صور أغلفة المقررات والدورات العلمية (Course Covers)
+    // =========================================================================
+    // قراءة عامة للزوار والطلبة، رفع وحذف محصور بالمشرفة بحد أقصى 10MB وصيغة صور
+    match /course_covers/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidImage(10 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 3.ب. صور أغلفة الكتب والمتون العلمية (Book Covers)
+    // =========================================================================
+    // قراءة عامة للزوار والطلبة، رفع وحذف محصور بالمشرفة بحد أقصى 10MB وصيغة صور سليمة (دون SVG)
+    match /book_covers/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidImage(10 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. المتون العلمية وكتب المقررات الإلكترونية (Course PDFs)
+    // =========================================================================
+    // قراءة عامة لطالبات العلم للدراسة والتحميل، وتعديل محصور بالمشرفة بحد أقصى 100MB ونوع PDF
+    match /course_pdfs/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidPdf(100 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 5. التسجيلات والشروحات الصوتية للدروس (Course Audios)
+    // =========================================================================
+    // استماع وتحميل عام للمواد العلمية، ورفع محصور بالمشرفة بحد أقصى 150MB ونوع صوتي
+    match /course_audios/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidAudio(150 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 6. المحاضرات والشروحات المرئية (Course Videos)
+    // =========================================================================
+    // مشاهدة عامة للدروس، ورفع محصور بالمشرفة بحد أقصى 500MB ونوع فيديو
+    match /course_videos/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidVideo(500 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 7. القاعدة الافتراضية الصارمة للإغلاق الشامل (Default Deny)
+    // =========================================================================
+    // منع القراءة والكتابة التام عن أي مسار غير معرّف أو غير مصرح به
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

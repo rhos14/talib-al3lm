@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Tajawal', system-ui, -apple-system, sans-serif;
+  }
+  
+  h1, h2, h3, h4, .font-serif {
+    font-family: 'Amiri', 'Tajawal', serif;
+  }
+}
+
+/* تخصيص شريط التمرير */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #10b981;
+}
+
+/* التنسيقات الإسلامية التقليدية */
+.bg-islamic-pattern {
+  background-image: radial-gradient(#10b981 0.75px, transparent 0.75px), radial-gradient(#10b981 0.75px, #f8fafc 0.75px);
+  background-size: 30px 30px;
+  background-position: 0 0,15px 15px;
+  background-opacity: 0.05;
+}
+
+.dark .bg-islamic-pattern {
+  background-image: radial-gradient(#059669 0.75px, transparent 0.75px), radial-gradient(#059669 0.75px, #020617 0.75px);
+}
+

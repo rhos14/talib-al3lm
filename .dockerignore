@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.gitignore
+.import-api-key
+*.local
+npm-debug.log
+.DS_Store

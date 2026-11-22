@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.import-api-key
+.backup/
+*.bak
+*.backup
+.admin-registry.json
+*service-account*.json
+firebase-service-account.json
+uploads/

@@ -1,0 +1,6 @@
+{
+  "name": "طلبة العلم",
+  "description": "منصة ويب احترافية لإدارة ومتابعة طلب العلم الشرعي والدروس والمتون العلمية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
