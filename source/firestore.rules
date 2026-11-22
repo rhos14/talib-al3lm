@@ -1,0 +1,428 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. الإغلاق الافتراضي الشامل
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // دالة التحقق من تسجيل الدخول
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // دالة التحقق الحصري من صلاحية المشرفة عبر Custom Claims الموثقة بأمان
+    function isAdmin() {
+      return isAuthenticated() && 
+        request.auth.token.keys().hasAll(['admin']) && 
+        request.auth.token.admin == true;
+    }
+
+    // دالة التحقق من صاحبة الحساب
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // =========================================================================
+    // 1. ملفات المستخدمين والمجموعات الفرعية المفصلة
+    // =========================================================================
+    match /users/{userId} {
+      // قراءة الملف محصورة على صاحبة الحساب أو المشرفة فقط
+      allow read: if isOwner(userId) || isAdmin();
+
+      // إنشاء الملف الشخصي كطالبة جديدة: قائمة بيضاء صارمة وتصفير إلزامي للحقول
+      allow create: if isOwner(userId) &&
+        request.resource.data.role == "student" &&
+        request.resource.data.uid == userId &&
+        request.resource.data.keys().hasOnly([
+          'uid', 'name', 'email', 'role', 'createdAt', 'displayName',
+          'firstName', 'lastName', 'profileCompleted',
+          'level', 'streak', 'completedMutunCount', 
+          'completedBooksCount', 'joinDate', 'bio', 'photoURL', 'photoFileId'
+        ]) &&
+        !('points' in request.resource.data) &&
+        !('totalStudyHours' in request.resource.data) &&
+        request.resource.data.streak == 0 &&
+        request.resource.data.completedMutunCount == 0 &&
+        request.resource.data.completedBooksCount == 0 &&
+        request.resource.data.name is string && request.resource.data.name.size() <= 85 &&
+        (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 85)) &&
+        (!('firstName' in request.resource.data) || (request.resource.data.firstName is string && request.resource.data.firstName.size() <= 40)) &&
+        (!('lastName' in request.resource.data) || (request.resource.data.lastName is string && request.resource.data.lastName.size() <= 40)) &&
+        (!('profileCompleted' in request.resource.data) || request.resource.data.profileCompleted is bool) &&
+        (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 800)) &&
+        (!('photoFileId' in request.resource.data) || (request.resource.data.photoFileId is string && request.resource.data.photoFileId.size() <= 200)) &&
+        request.resource.data.email is string &&
+        request.resource.data.level in ['مبتدئ', 'متوسط', 'متقدم'];
+
+      // تحديث الملف الشخصي:
+      // - المشرفة تملك الصلاحية الكاملة
+      // - الطالبة ممنوعة من تغيير المعرفات، الدور، البريد، والحقول الأكاديمية (Server-Only)
+      // - توافقية آمنة للمستندات التاريخية السابقة التي تحوي نقاطاً أو ساعات مع منع التعديل التام
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        resource != null &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.email == resource.data.email &&
+        (!('totalStudyHours' in request.resource.data) || ('totalStudyHours' in resource.data && request.resource.data.totalStudyHours == resource.data.totalStudyHours)) &&
+        (!('completedMutunCount' in request.resource.data) || request.resource.data.completedMutunCount == resource.data.completedMutunCount) &&
+        (!('completedBooksCount' in request.resource.data) || request.resource.data.completedBooksCount == resource.data.completedBooksCount) &&
+        (!('streak' in request.resource.data) || request.resource.data.streak == resource.data.streak) &&
+        (!('lastStreakDate' in request.resource.data) || request.resource.data.lastStreakDate == resource.data.lastStreakDate) &&
+        (!('points' in request.resource.data) || ('points' in resource.data && request.resource.data.points == resource.data.points)) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'displayName', 'name', 'firstName', 'lastName', 'profileCompleted', 'bio', 'photoURL', 'photoFileId', 'level'
+        ]) &&
+        (!('displayName' in request.resource.data) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 85)) &&
+        (!('name' in request.resource.data) || (request.resource.data.name is string && request.resource.data.name.size() <= 85)) &&
+        (!('firstName' in request.resource.data) || (request.resource.data.firstName is string && request.resource.data.firstName.size() <= 40)) &&
+        (!('lastName' in request.resource.data) || (request.resource.data.lastName is string && request.resource.data.lastName.size() <= 40)) &&
+        (!('profileCompleted' in request.resource.data) || request.resource.data.profileCompleted is bool) &&
+        (!('bio' in request.resource.data) || (request.resource.data.bio is string && request.resource.data.bio.size() <= 300)) &&
+        (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 800)) &&
+        (!('photoFileId' in request.resource.data) || (request.resource.data.photoFileId is string && request.resource.data.photoFileId.size() <= 200)) &&
+        (!('level' in request.resource.data) || (request.resource.data.level in ['مبتدئ', 'متوسط', 'متقدم']))
+      );
+
+      allow delete: if isAdmin();
+
+      // أ) تقدم المحاضرات (lecture_progress)
+      match /lecture_progress/{progressId} {
+        allow read: if isOwner(userId) || isAdmin();
+        
+        // الطالبة تنشئ سجل الدرس لحفظ موضع القراءة والاستماع فقط دون إمكانية كتابة نتائج النجاح أو الدرجات
+        allow create: if isAdmin() || (
+          isOwner(userId) &&
+          request.resource.data.keys().hasOnly([
+            'id', 'lectureId', 'bookId', 'courseId', 
+            'lastPdfPage', 'lastPlaybackPosition', 'lectureWatchPercentage', 
+            'bookReadPercentage', 'totalLessonProgressPercentage', 'bookmarks'
+          ]) &&
+          request.resource.data.id is string && request.resource.data.id.size() <= 100 &&
+          request.resource.data.lectureId is string && request.resource.data.lectureId.size() <= 100 &&
+          request.resource.data.bookId is string && request.resource.data.bookId.size() <= 100 &&
+          request.resource.data.courseId is string && request.resource.data.courseId.size() <= 100 &&
+          (!('lastPdfPage' in request.resource.data) || (request.resource.data.lastPdfPage is int && request.resource.data.lastPdfPage >= 1 && request.resource.data.lastPdfPage <= 10000)) &&
+          (!('lastPlaybackPosition' in request.resource.data) || ((request.resource.data.lastPlaybackPosition is int || request.resource.data.lastPlaybackPosition is float) && request.resource.data.lastPlaybackPosition >= 0 && request.resource.data.lastPlaybackPosition <= 86400)) &&
+          (!('lectureWatchPercentage' in request.resource.data) || ((request.resource.data.lectureWatchPercentage is int || request.resource.data.lectureWatchPercentage is float) && request.resource.data.lectureWatchPercentage >= 0 && request.resource.data.lectureWatchPercentage <= 100)) &&
+          (!('bookReadPercentage' in request.resource.data) || ((request.resource.data.bookReadPercentage is int || request.resource.data.bookReadPercentage is float) && request.resource.data.bookReadPercentage >= 0 && request.resource.data.bookReadPercentage <= 100)) &&
+          (!('totalLessonProgressPercentage' in request.resource.data) || ((request.resource.data.totalLessonProgressPercentage is int || request.resource.data.totalLessonProgressPercentage is float) && request.resource.data.totalLessonProgressPercentage >= 0 && request.resource.data.totalLessonProgressPercentage <= 100)) &&
+          !('isPassed' in request.resource.data) &&
+          !('attemptsCount' in request.resource.data) &&
+          !('lastScore' in request.resource.data) &&
+          !('bestScore' in request.resource.data) &&
+          !('isLectureFinished' in request.resource.data) &&
+          !('completed' in request.resource.data)
+        );
+        
+        // التحديث: المشرفة تملك الصلاحية الكاملة (بما فيها خادم التصحيح)
+        // الطالبة مقيدة فقط بتحديث حقول الموضع والقراءة وممنوعة من تزوير isPassed أو الدرجات
+        allow update: if isAdmin() || (
+          isOwner(userId) &&
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'lastPdfPage', 'lastPlaybackPosition', 'lectureWatchPercentage', 
+            'bookReadPercentage', 'totalLessonProgressPercentage', 'bookmarks'
+          ]) &&
+          (!('lastPdfPage' in request.resource.data) || (request.resource.data.lastPdfPage is int && request.resource.data.lastPdfPage >= 1 && request.resource.data.lastPdfPage <= 10000)) &&
+          (!('lastPlaybackPosition' in request.resource.data) || ((request.resource.data.lastPlaybackPosition is int || request.resource.data.lastPlaybackPosition is float) && request.resource.data.lastPlaybackPosition >= 0 && request.resource.data.lastPlaybackPosition <= 86400)) &&
+          (!('lectureWatchPercentage' in request.resource.data) || ((request.resource.data.lectureWatchPercentage is int || request.resource.data.lectureWatchPercentage is float) && request.resource.data.lectureWatchPercentage >= 0 && request.resource.data.lectureWatchPercentage <= 100)) &&
+          (!('bookReadPercentage' in request.resource.data) || ((request.resource.data.bookReadPercentage is int || request.resource.data.bookReadPercentage is float) && request.resource.data.bookReadPercentage >= 0 && request.resource.data.bookReadPercentage <= 100)) &&
+          (!('totalLessonProgressPercentage' in request.resource.data) || ((request.resource.data.totalLessonProgressPercentage is int || request.resource.data.totalLessonProgressPercentage is float) && request.resource.data.totalLessonProgressPercentage >= 0 && request.resource.data.totalLessonProgressPercentage <= 100))
+        );
+
+        allow delete: if isAdmin();
+      }
+
+      // ب) سجل نشاطات الطالبة (student_activities): الخادم والمشرفة فقط
+      match /student_activities/{activityId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update, delete: if isAdmin();
+      }
+
+      // سجل محاولات الاختبارات الذري لمنع التكرار (quiz_attempts): الخادم والمشرفة فقط
+      match /quiz_attempts/{attemptId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isAdmin();
+      }
+
+      // ج) إشعارات الطالبة الداخلية (student_notifications)
+      match /student_notifications/{notificationId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin() || (
+          isOwner(userId) && 
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']) &&
+          request.resource.data.isRead is bool &&
+          (!('readAt' in request.resource.data) || (request.resource.data.readAt is string && request.resource.data.readAt.size() <= 50))
+        );
+      }
+
+      // د) الإشعارات الرسمية والشهادات (notifications)
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin() || (
+          isOwner(userId) && 
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']) &&
+          request.resource.data.isRead is bool &&
+          (!('readAt' in request.resource.data) || (request.resource.data.readAt is string && request.resource.data.readAt.size() <= 50))
+        );
+      }
+
+      // هـ) أوراد وعادات الطالبة الشخصية (habits)
+      match /habits/{habitId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if (isOwner(userId) || isAdmin()) &&
+          request.resource.data.keys().hasOnly(['id', 'title', 'category', 'targetUnit', 'targetCount', 'completedToday', 'streak', 'history', 'createdAt']) &&
+          request.resource.data.title is string && request.resource.data.title.size() <= 100 &&
+          request.resource.data.category in ['القرآن الكريم', 'حفظ المتون', 'مراجعة', 'قراءة حرة', 'سماع دروس'] &&
+          request.resource.data.targetCount is int && request.resource.data.targetCount >= 1 && request.resource.data.targetCount <= 1000 &&
+          request.resource.data.completedToday is int && request.resource.data.completedToday >= 0 &&
+          request.resource.data.streak is int && request.resource.data.streak >= 0;
+        allow update: if (isOwner(userId) || isAdmin()) &&
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'targetUnit', 'targetCount', 'completedToday', 'streak', 'history']) &&
+          (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 100)) &&
+          (!('targetCount' in request.resource.data) || (request.resource.data.targetCount is int && request.resource.data.targetCount >= 1 && request.resource.data.targetCount <= 1000)) &&
+          (!('completedToday' in request.resource.data) || (request.resource.data.completedToday is int && request.resource.data.completedToday >= 0)) &&
+          (!('streak' in request.resource.data) || (request.resource.data.streak is int && request.resource.data.streak >= 0));
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // و) الفوائد الشخصية (fawaid)
+      match /fawaid/{faidaId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if (isOwner(userId) || isAdmin()) &&
+          request.resource.data.keys().hasOnly(['id', 'title', 'content', 'category', 'sourceBook', 'sheikh', 'pageNumber', 'createdAt', 'tags', 'isFavorite']) &&
+          request.resource.data.title is string && request.resource.data.title.size() <= 150 &&
+          request.resource.data.content is string && request.resource.data.content.size() <= 3000 &&
+          (!('sourceBook' in request.resource.data) || (request.resource.data.sourceBook is string && request.resource.data.sourceBook.size() <= 120)) &&
+          (!('sheikh' in request.resource.data) || (request.resource.data.sheikh is string && request.resource.data.sheikh.size() <= 80));
+        allow update: if (isOwner(userId) || isAdmin()) &&
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'content', 'category', 'sourceBook', 'sheikh', 'pageNumber', 'tags', 'isFavorite']) &&
+          (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 150)) &&
+          (!('content' in request.resource.data) || (request.resource.data.content is string && request.resource.data.content.size() <= 3000));
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // ز) ملاحظات الدروس الشخصية (lectures)
+      match /lectures/{lectureNoteId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if (isOwner(userId) || isAdmin()) &&
+          request.resource.data.keys().hasOnly(['id', 'lectureId', 'title', 'notes', 'timestamp', 'tags']) &&
+          request.resource.data.title is string && request.resource.data.title.size() <= 150 &&
+          (!('notes' in request.resource.data) || (request.resource.data.notes is string && request.resource.data.notes.size() <= 5000));
+        allow update: if (isOwner(userId) || isAdmin()) &&
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'notes', 'tags']) &&
+          (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 150)) &&
+          (!('notes' in request.resource.data) || (request.resource.data.notes is string && request.resource.data.notes.size() <= 5000));
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // ح) مسودات المنشورات (posts)
+      match /posts/{postId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if (isOwner(userId) || isAdmin()) &&
+          request.resource.data.keys().hasOnly(['id', 'title', 'body', 'category', 'createdAt', 'status']) &&
+          request.resource.data.title is string && request.resource.data.title.size() <= 150 &&
+          request.resource.data.body is string && request.resource.data.body.size() <= 5000;
+        allow update: if (isOwner(userId) || isAdmin()) &&
+          resource != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'category', 'status']) &&
+          (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 150)) &&
+          (!('body' in request.resource.data) || (request.resource.data.body is string && request.resource.data.body.size() <= 5000));
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // =========================================================================
+    // 2. المقررات والكتب والمحاضرات وأسئلة الاختبارات
+    // =========================================================================
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /course_books/{bookId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /course_lectures/{lectureId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // أسئلة الاختبارات: حظر قراءة مفاتيح الإجابات وcorrectAnswer من العميل
+    // قراءة وكتابة المشرفة حصراً (الطلاب يتلقون الأسئلة المنقاة عبر الخادم الموثق)
+    match /lecture_questions/{questionId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 3. الشهادات المصدرة وطلبات الشهادات
+    // =========================================================================
+    match /certificates/{certificateId} {
+      allow read: if isAuthenticated() && (
+        (resource != null && resource.data.studentId == request.auth.uid) || 
+        isAdmin()
+      );
+      // حظر إنشاء الشهادات من العميل، للمشرفة والخادم فقط
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /certificate_requests/{requestId} {
+      allow read: if isAuthenticated() && (
+        (resource != null && resource.data.studentId == request.auth.uid) || 
+        isAdmin()
+      );
+      
+      // الطالبة تنشئ طلبها بحالة pending حصراً وبرقم معرفها وقائمة حقول بيضاء
+      allow create: if isAuthenticated() && 
+        request.resource.data.studentId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'studentEmail', 
+          'courseId', 'courseTitle', 'bookId', 'bookTitle', 
+          'timestamp', 'status', 'isFinalSession', 'studentNotes', 'studentPhone'
+        ]) &&
+        !('approved' in request.resource.data) &&
+        !('issued' in request.resource.data) &&
+        !('certificateUrl' in request.resource.data) &&
+        !('adminNotes' in request.resource.data) &&
+        !('reviewedBy' in request.resource.data) &&
+        request.resource.data.studentName is string && request.resource.data.studentName.size() <= 80 &&
+        request.resource.data.courseTitle is string && request.resource.data.courseTitle.size() <= 120 &&
+        request.resource.data.bookTitle is string && request.resource.data.bookTitle.size() <= 120;
+        
+      // التحديث: المشرفة تعتمد أو ترفض، بينما الطالبة تعدل ملاحظاتها فقط إذا كان الطلب لا يزال pending
+      allow update: if isAdmin() || (
+        isAuthenticated() &&
+        resource != null &&
+        resource.data.studentId == request.auth.uid &&
+        request.resource.data.studentId == request.auth.uid &&
+        resource.data.status == 'pending' &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['studentNotes', 'studentPhone', 'studentName']) &&
+        (!('studentNotes' in request.resource.data) || (request.resource.data.studentNotes is string && request.resource.data.studentNotes.size() <= 500)) &&
+        (!('studentPhone' in request.resource.data) || (request.resource.data.studentPhone is string && request.resource.data.studentPhone.size() <= 30)) &&
+        (!('studentName' in request.resource.data) || (request.resource.data.studentName is string && request.resource.data.studentName.size() <= 80)) &&
+        !('approved' in request.resource.data) &&
+        !('issued' in request.resource.data) &&
+        !('certificateUrl' in request.resource.data) &&
+        !('adminNotes' in request.resource.data) &&
+        !('reviewedBy' in request.resource.data)
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. إعدادات المنصة والإحصائيات العامة
+    // =========================================================================
+    // الإحصائيات العامة: قراءة عامة للزوار وحظر تام لكتابة أي عميل (حتى المشرفة عبر SDK العميل)
+    match /settings/public_stats {
+      allow read: if true;
+      allow write: if false; // الخادم يحدّثها حصراً عبر Firebase Admin SDK
+    }
+
+    // إعدادات المنصة العامة: حظر تام لكتابة public_stats وتحديد ما يُقرأ صراحة
+    match /settings/{settingId} {
+      // حظر قاطع لكتابة أي عميل على public_stats حتى لو كان مشرفاً
+      allow write: if settingId != 'public_stats' && isAdmin();
+      // قراءة الإعدادات العامة المصرح بها صراحة للطالبات
+      allow read: if isAdmin() || (
+        isAuthenticated() && 
+        settingId != 'public_stats' && 
+        settingId in ['general_config', 'site_announcements', 'academic_terms', 'ui_theme']
+      );
+    }
+
+    // إعدادات النظام الحساسة والمفاتيح للمشرفة فقط
+    match /system_settings/{settingId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 5. الفوائد العامة، متتبع العادات العام، والمنشورات المجتمعية
+    // =========================================================================
+    match /fawaid/{faidaId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.keys().hasOnly(['id', 'authorId', 'authorName', 'title', 'content', 'category', 'sourceBook', 'sheikh', 'pageNumber', 'createdAt', 'tags', 'isFavorite', 'likesCount']) &&
+        request.resource.data.title is string && request.resource.data.title.size() <= 150 &&
+        request.resource.data.content is string && request.resource.data.content.size() <= 3000 &&
+        (!('sourceBook' in request.resource.data) || (request.resource.data.sourceBook is string && request.resource.data.sourceBook.size() <= 120));
+      allow update: if isAuthenticated() && (
+        (resource != null && resource.data.authorId == request.auth.uid && request.resource.data.authorId == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'content', 'category', 'sourceBook', 'sheikh', 'pageNumber', 'tags', 'isFavorite']) &&
+         (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 150)) &&
+         (!('content' in request.resource.data) || (request.resource.data.content is string && request.resource.data.content.size() <= 3000))
+        ) || isAdmin()
+      );
+      allow delete: if isAuthenticated() && (resource.data.authorId == request.auth.uid || isAdmin());
+    }
+
+    match /habits/{habitId} {
+      allow read: if isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid) || isAdmin()
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.keys().hasOnly(['id', 'userId', 'title', 'category', 'targetUnit', 'targetCount', 'completedToday', 'streak', 'history', 'createdAt']) &&
+        request.resource.data.title is string && request.resource.data.title.size() <= 100 &&
+        request.resource.data.category in ['القرآن الكريم', 'حفظ المتون', 'مراجعة', 'قراءة حرة', 'سماع دروس'] &&
+        request.resource.data.targetCount is int && request.resource.data.targetCount >= 1 && request.resource.data.targetCount <= 1000 &&
+        request.resource.data.completedToday is int && request.resource.data.completedToday >= 0 &&
+        request.resource.data.streak is int && request.resource.data.streak >= 0;
+      allow update: if isAuthenticated() && (
+        (resource != null && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'targetUnit', 'targetCount', 'completedToday', 'streak', 'history']) &&
+         (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 100)) &&
+         (!('targetCount' in request.resource.data) || (request.resource.data.targetCount is int && request.resource.data.targetCount >= 1 && request.resource.data.targetCount <= 1000)) &&
+         (!('completedToday' in request.resource.data) || (request.resource.data.completedToday is int && request.resource.data.completedToday >= 0)) &&
+         (!('streak' in request.resource.data) || (request.resource.data.streak is int && request.resource.data.streak >= 0))
+        ) || isAdmin()
+      );
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /community_posts/{postId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.keys().hasOnly(['id', 'authorId', 'authorName', 'authorPhoto', 'authorLevel', 'title', 'body', 'category', 'createdAt', 'likesCount', 'commentsCount']) &&
+        request.resource.data.title is string && request.resource.data.title.size() <= 150 &&
+        request.resource.data.body is string && request.resource.data.body.size() <= 5000 &&
+        request.resource.data.category in ['مسألة فقهية', 'فوائد حديثية', 'نصيحة لطالب العلم', 'استفسار منهجي', 'نقاش عام'];
+      allow update: if isAuthenticated() && (
+        (resource != null && resource.data.authorId == request.auth.uid && request.resource.data.authorId == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'category']) &&
+         (!('title' in request.resource.data) || (request.resource.data.title is string && request.resource.data.title.size() <= 150)) &&
+         (!('body' in request.resource.data) || (request.resource.data.body is string && request.resource.data.body.size() <= 5000))
+        ) || isAdmin()
+      );
+      allow delete: if isAuthenticated() && (resource.data.authorId == request.auth.uid || isAdmin());
+    }
+
+    // مهام الاستيراد الذكي للمحاضرات (المشرفة حصراً)
+    match /lecture_import_tasks/{taskId} {
+      allow read, write: if isAdmin();
+    }
+
+    // استعلامات Collection Group لتقدم المحاضرات للمشرفة فقط دون إمكانية كتابة
+    match /{path=**}/lecture_progress/{progressId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+  }
+}

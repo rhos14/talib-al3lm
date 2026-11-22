@@ -1,0 +1,188 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "بيانات ملفات طلاب وطالبات العلم والمشرفة العامة في المنصة",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "معرف المستخدم الفريد في Firebase" },
+        "name": { "type": "string", "description": "الاسم الصريح أو المستعار" },
+        "displayName": { "type": "string", "description": "الاسم المعروض في المنصة" },
+        "firstName": { "type": "string", "description": "الاسم الأول" },
+        "lastName": { "type": "string", "description": "الكنية أو اسم العائلة" },
+        "profileCompleted": { "type": "boolean", "description": "حالة استكمال بيانات الملف الشخصي" },
+        "email": { "type": "string", "description": "البريد الإلكتروني" },
+        "role": { "type": "string", "enum": ["admin", "student"], "description": "دور المستخدم" },
+        "createdAt": { "type": "string", "description": "تاريخ إنشاء الحساب بصيغة ISO" },
+        "level": { "type": "string", "description": "المستوى الأكاديمي الحالي" },
+        "streak": { "type": "number", "description": "عدد أيام المتابعة المتتالية" },
+        "completedMutunCount": { "type": "number", "description": "عدد المتون المكتملة" },
+        "completedBooksCount": { "type": "number", "description": "عدد المتون والكتب المنتهية بالكامل" },
+        "joinDate": { "type": "string", "description": "تاريخ الانضمام الهجري أو الميلادي" },
+        "bio": { "type": "string", "description": "نبذة شخصية" },
+        "photoURL": { "type": "string", "description": "رابط الصورة الرمزية" },
+        "photoFileId": { "type": "string", "description": "معرف ملف الصورة الرمزية على ImageKit للحذف الآمن" }
+      },
+      "required": ["uid", "name", "email", "role"]
+    },
+    "Course": {
+      "title": "Course",
+      "description": "الدورات العلمية المتاحة في المنصة",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف الدورة" },
+        "title": { "type": "string", "description": "عنوان الدورة" },
+        "description": { "type": "string", "description": "وصف الدورة" },
+        "imageUrl": { "type": "string", "description": "رابط غلاف الدورة" },
+        "imageFileId": { "type": "string", "description": "معرف ملف غلاف الدورة على ImageKit للحذف الآمن" },
+        "order": { "type": "number", "description": "ترتيب العرض" },
+        "isVisible": { "type": "boolean", "description": "حالة ظهور الدورة للعامة" },
+        "createdAt": { "type": "string", "description": "تاريخ الإنشاء بصيغة ISO" }
+      },
+      "required": ["id", "title"]
+    },
+    "CourseBook": {
+      "title": "CourseBook",
+      "description": "الكتب الدراسية والمتون التابعة لدورة معينة",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف الكتاب" },
+        "courseId": { "type": "string", "description": "معرف الدورة المرتبطة" },
+        "title": { "type": "string", "description": "عنوان الكتاب أو المتن المشروح" },
+        "imageUrl": { "type": "string", "description": "رابط صورة غلاف الكتاب" },
+        "imageFileId": { "type": "string", "description": "معرف ملف غلاف الكتاب على ImageKit للحذف الآمن" },
+        "order": { "type": "number", "description": "ترتيب الكتاب داخل الدورة" },
+        "createdAt": { "type": "string", "description": "تاريخ الإنشاء بصيغة ISO" }
+      },
+      "required": ["id", "courseId", "title"]
+    },
+    "CourseLectureItem": {
+      "title": "CourseLectureItem",
+      "description": "المحاضرات أو الدروس التفصيلية داخل كتاب معين",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف المحاضرة" },
+        "bookId": { "type": "string", "description": "معرف الكتاب" },
+        "courseId": { "type": "string", "description": "معرف الدورة" },
+        "title": { "type": "string", "description": "عنوان المحاضرة والدرس" },
+        "description": { "type": "string", "description": "وصف موجز للمحاضرة ومحاورها" },
+        "videoUrl": { "type": "string", "description": "رابط فيديو الشرح" },
+        "audioUrl": { "type": "string", "description": "رابط الملف الصوتي للشرح" },
+        "pdfUrl": { "type": "string", "description": "رابط ملف PDF المرفق" },
+        "notes": { "type": "string", "description": "ملاحظات وتلخيص الدرس المكتوب" },
+        "duration": { "type": "string", "description": "مدة المحاضرة المقدرة" },
+        "order": { "type": "number", "description": "ترتيب المحاضرة داخل الكتاب" },
+        "createdAt": { "type": "string", "description": "تاريخ الإنشاء بصيغة ISO" }
+      },
+      "required": ["id", "bookId", "courseId", "title"]
+    },
+    "Certificate": {
+      "title": "Certificate",
+      "description": "الشهادات العلمية المعتمدة الصادرة من المشرفة للطالبات",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف الشهادة المعتمدة" },
+        "certificateNumber": { "type": "string", "description": "الرقم المرجعي الفريد للشهادة" },
+        "studentId": { "type": "string", "description": "معرف الطالبة المستلمة للشهادة" },
+        "studentName": { "type": "string", "description": "اسم الطالبة كما سيظهر على الشهادة" },
+        "courseId": { "type": "string", "description": "معرف الدورة" },
+        "courseName": { "type": "string", "description": "اسم الدورة العلمية" },
+        "bookId": { "type": "string", "description": "معرف الكتاب المشروح" },
+        "bookName": { "type": "string", "description": "عنوان الكتاب أو المتن المجتاز" },
+        "date": { "type": "string", "description": "تاريخ إصدار الشهادة" },
+        "issuerName": { "type": "string", "description": "اسم المشرفة المصدرة للشهادة" },
+        "fileUrl": { "type": "string", "description": "رابط ملف الشهادة" },
+        "createdAt": { "type": "string", "description": "تاريخ التسجيل بصيغة ISO" }
+      },
+      "required": ["id", "certificateNumber", "studentId", "courseId", "bookId"]
+    },
+    "CertificateRequest": {
+      "title": "CertificateRequest",
+      "description": "طلبات اعتماد الشهادات المقدمة من الطالبات",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف الطلب" },
+        "studentId": { "type": "string", "description": "معرف الطالبة مقدمة الطلب" },
+        "studentName": { "type": "string", "description": "اسم الطالبة" },
+        "courseId": { "type": "string", "description": "معرف الدورة" },
+        "courseName": { "type": "string", "description": "اسم الدورة" },
+        "bookId": { "type": "string", "description": "معرف الكتاب" },
+        "bookName": { "type": "string", "description": "عنوان الكتاب المنجز" },
+        "requestDate": { "type": "string", "description": "تاريخ تقديم الطلب" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "issued"], "description": "حالة الطلب" },
+        "notes": { "type": "string", "description": "ملاحظات إضافية" }
+      },
+      "required": ["id", "studentId", "courseId", "bookId", "status"]
+    },
+    "LectureImportTask": {
+      "title": "LectureImportTask",
+      "description": "سجلات ومهام الاستيراد الذكي للمحاضرات من قوائم تشغيل يوتيوب مع حالة التقدم",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "معرف المهمة" },
+        "courseId": { "type": "string", "description": "معرف الدورة" },
+        "courseTitle": { "type": "string", "description": "عنوان الدورة" },
+        "bookId": { "type": "string", "description": "معرف الكتاب" },
+        "bookTitle": { "type": "string", "description": "عنوان الكتاب" },
+        "playlistUrl": { "type": "string", "description": "رابط قائمة تشغيل يوتيوب" },
+        "batchSize": { "type": "string", "enum": ["5", "10", "all"], "description": "حجم الدفعة المستوردة" },
+        "status": { "type": "string", "enum": ["idle", "running", "paused", "completed", "failed"], "description": "حالة المهمة" },
+        "totalCount": { "type": "number", "description": "إجمالي عدد المحاضرات المكتشفة" },
+        "completedCount": { "type": "number", "description": "عدد المحاضرات المستوردة بنجاح" },
+        "remainingCount": { "type": "number", "description": "عدد المحاضرات المتبقية" },
+        "skippedCount": { "type": "number", "description": "عدد المحاضرات المتخطاة لمنع التكرار" },
+        "errorCount": { "type": "number", "description": "عدد المحاضرات المتعثرة" },
+        "notebookLmReady": { "type": "boolean", "description": "هل تكامل NotebookLM متصل حقيقة" },
+        "notebookLmNote": { "type": "string", "description": "ملاحظات وتوثيق حالة الاتصال بـ NotebookLM" },
+        "createdAt": { "type": "string", "description": "تاريخ إنشاء المهمة بصيغة ISO" },
+        "updatedAt": { "type": "string", "description": "تاريخ آخر تحديث للمهمة بصيغة ISO" },
+        "adminUid": { "type": "string", "description": "معرف المشرفة التي أنشأت المهمة" }
+      },
+      "required": ["id", "courseId", "bookId", "playlistUrl", "status"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "إعدادات النظام العامة وبيانات مفاتيح الربط المحمية",
+      "type": "object",
+      "properties": {
+        "apiKey": { "type": "string", "description": "مفتاح الأتمتة المعتمد" },
+        "name": { "type": "string", "description": "اسم الإعداد" },
+        "updatedAt": { "type": "string", "description": "تاريخ آخر تحديث" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "بيانات ملفات المستخدمين"
+    },
+    "/courses/{courseId}": {
+      "schema": "Course",
+      "description": "المقررات والدورات الدراسية"
+    },
+    "/course_books/{bookId}": {
+      "schema": "CourseBook",
+      "description": "الكتب الدراسية والمتون"
+    },
+    "/course_lectures/{lectureId}": {
+      "schema": "CourseLectureItem",
+      "description": "المحاضرات والدروس العلمية"
+    },
+    "/certificates/{certificateId}": {
+      "schema": "Certificate",
+      "description": "الشهادات العلمية المعتمدة"
+    },
+    "/certificate_requests/{requestId}": {
+      "schema": "CertificateRequest",
+      "description": "طلبات الشهادات"
+    },
+    "/lecture_import_tasks/{taskId}": {
+      "schema": "LectureImportTask",
+      "description": "مهام الاستيراد الذكي للمحاضرات للمشرفة فقط"
+    },
+    "/system_settings/{settingId}": {
+      "schema": "SystemSettings",
+      "description": "إعدادات النظام ومفاتيح الربط للمشرفة"
+    }
+  }
+}
